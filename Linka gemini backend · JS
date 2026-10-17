@@ -1,0 +1,58 @@
+// Linka: gerador de cursos com Gemini (Node 18+). Serve como função serverless (Vercel, Netlify, Cloud Functions)
+// ou dentro de um Express. A chave da API fica SOMENTE aqui, no servidor, nunca no app.
+//
+// Variáveis de ambiente:
+//   GEMINI_API_KEY  chave criada no Google AI Studio
+//   GEMINI_MODEL    opcional; confira o nome atual do modelo na documentação do Gemini (padrão abaixo)
+//   ALLOWED_ORIGIN  endereço do seu app, ex.: https://app.linka.com.br
+//
+// No app (linka-app.html), preencha: const GEMINI_ENDPOINT = 'https://SEU-SERVIDOR/api/gerar-curso';
+
+const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+
+const PROMPT = (v) => `Você é um designer instrucional. Crie um curso curto e REAL, em português do Brasil, para preparar uma pessoa para esta vaga.
+Vaga: ${v.titulo} na empresa ${v.empresa}. Modelo: ${v.modelo}.
+Descrição: ${v.descricao}
+Requisitos: ${v.requisitos.join(', ')}
+
+Regras:
+- Exatamente 3 lições, cada uma com texto explicativo de 2 a 4 frases, tecnicamente correto e sem inventar fatos.
+- Cada lição termina com 1 pergunta de múltipla escolha, com 3 opções e uma única resposta correta.
+- A primeira lição deve contextualizar a vaga; as outras duas ensinam os requisitos mais importantes.
+- Responda SOMENTE com JSON neste formato:
+{"t":"título","g":["habilidades que o curso valida"],"h":"duração, ex.: 1 h","lv":"Iniciante|Intermediário|Avançado",
+ "L":[["título da lição","texto","pergunta",["opção A","opção B","opção C"],indiceDaCorreta]]}`;
+
+function valido(c) {
+  return c && typeof c.t === 'string' && Array.isArray(c.g) && Array.isArray(c.L) && c.L.length === 3 &&
+    c.L.every((l) => Array.isArray(l) && l.length === 5 && Array.isArray(l[3]) && l[3].length === 3 &&
+      Number.isInteger(l[4]) && l[4] >= 0 && l[4] < 3);
+}
+
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'POST') return res.status(405).json({ erro: 'Use POST' });
+
+  const v = req.body && req.body.vaga;
+  if (!v || !v.titulo || !Array.isArray(v.requisitos)) return res.status(400).json({ erro: 'Vaga inválida' });
+
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: PROMPT(v) }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0.4 },
+      }),
+    });
+    const data = await r.json();
+    const curso = JSON.parse(data.candidates[0].content.parts[0].text);
+    // O modelo pode errar o formato ou o conteúdo: valide antes de entregar e revise os cursos antes de publicar.
+    if (!valido(curso)) return res.status(502).json({ erro: 'Resposta fora do formato' });
+    return res.status(200).json(curso);
+  } catch (e) {
+    return res.status(502).json({ erro: 'Falha ao gerar o curso' });
+  }
+}
